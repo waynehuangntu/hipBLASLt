@@ -1,74 +1,94 @@
+/*******************************************************************************
+ *
+ * MIT License
+ *
+ * Copyright (C) 2022-2024 Advanced Micro Devices, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ *******************************************************************************/
+
+#include "helper.h"
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
 #include <iostream>
 
-#include "helper.h"
-
-void simpleGemmBias(hipblasLtHandle_t  handle,
-                hipblasOperation_t trans_a,
-                hipblasOperation_t trans_b,
-                int64_t            m,
-                int64_t            n,
-                int64_t            k,
-                int64_t            batch_count,
-                float&             alpha,
-                float&             beta,
-                void*              d_a,
-                void*              d_b,
-                void*              d_c,
-                void*              d_d,
-                void*              d_workspace,
-                int64_t            max_workspace_size,
-                hipStream_t        stream);
+void simpleGemmGeluAuxBias(hipblasLtHandle_t  handle,
+                           hipblasOperation_t trans_a,
+                           hipblasOperation_t trans_b,
+                           int64_t            m,
+                           int64_t            n,
+                           int64_t            k,
+                           int64_t            batch_count,
+                           float&             alpha,
+                           float&             beta,
+                           void*              d_a,
+                           void*              d_b,
+                           void*              d_c,
+                           void*              d_d,
+                           void*              d_workspace,
+                           int64_t            max_workspace_size,
+                           hipStream_t        stream);
 
 int main()
 {
-    /** This is a NN example with
-     *  a = (m, k). lda = m
-     *  b = (k, n). ldb = k
-     *  c = d = (m, n). ldc = ldd = m
-     */
     Runner<hipblasLtHalf, hipblasLtHalf, hipblasLtHalf, float, float> runner(
         1024, 512, 1024, 1, 1.f, 1.f, 32 * 1024 * 1024);
 
     runner.run([&runner] {
-        simpleGemmBias(runner.handle,
-                   HIPBLAS_OP_N,
-                   HIPBLAS_OP_N,
-                   runner.m,
-                   runner.n,
-                   runner.k,
-                   runner.batch_count,
-                   runner.alpha,
-                   runner.beta,
-                   runner.d_a,
-                   runner.d_b,
-                   runner.d_c,
-                   runner.d_d,
-                   runner.d_workspace,
-                   runner.max_workspace_size,
-                   runner.stream);
+        simpleGemmGeluAuxBias(runner.handle,
+                              HIPBLAS_OP_N,
+                              HIPBLAS_OP_N,
+                              runner.m,
+                              runner.n,
+                              runner.k,
+                              runner.batch_count,
+                              runner.alpha,
+                              runner.beta,
+                              runner.d_a,
+                              runner.d_b,
+                              runner.d_c,
+                              runner.d_d,
+                              runner.d_workspace,
+                              runner.max_workspace_size,
+                              runner.stream);
     });
 
     return 0;
 }
 
-void simpleGemmBias(hipblasLtHandle_t  handle,
-                hipblasOperation_t trans_a,
-                hipblasOperation_t trans_b,
-                int64_t            m,
-                int64_t            n,
-                int64_t            k,
-                int64_t            batch_count,
-                float&             alpha,
-                float&             beta,
-                void*              d_a,
-                void*              d_b,
-                void*              d_c,
-                void*              d_d,
-                void*              d_workspace,
-                int64_t            max_workspace_size,
-                hipStream_t        stream)
+void simpleGemmGeluAuxBias(hipblasLtHandle_t  handle,
+                           hipblasOperation_t trans_a,
+                           hipblasOperation_t trans_b,
+                           int64_t            m,
+                           int64_t            n,
+                           int64_t            k,
+                           int64_t            batch_count,
+                           float&             alpha,
+                           float&             beta,
+                           void*              d_a,
+                           void*              d_b,
+                           void*              d_c,
+                           void*              d_d,
+                           void*              d_workspace,
+                           int64_t            max_workspace_size,
+                           hipStream_t        stream)
 {
     hipblasLtMatrixLayout_t matA, matB, matC, matD;
     CHECK_HIPBLASLT_ERROR(hipblasLtMatrixLayoutCreate(&matA, HIP_R_16F, m, k, m));
@@ -107,19 +127,41 @@ void simpleGemmBias(hipblasLtHandle_t  handle,
     CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
         matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(int32_t)));
 
-    hipblasLtEpilogue_t epilogue = HIPBLASLT_EPILOGUE_BIAS;
+    hipblasLtEpilogue_t epilogue = HIPBLASLT_EPILOGUE_GELU_AUX_BIAS;
     CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
         matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
 
-    hipDataType bias_data_type = HIP_R_16F;
-    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(hipDataType)));
+    // Set auxiliary buffer
+    void* d_aux_buffer;
+    CHECK_HIP_ERROR(hipMalloc(&d_aux_buffer, m * n * sizeof(hipblasLtHalf)));
+    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_POINTER, &d_aux_buffer, sizeof(void*)));
+
+    // Set auxiliary leading dimension (ld)
+    const int64_t aux_ld = m;
+    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &aux_ld, sizeof(aux_ld)));
+
+    // Set Epilogue Aux Batch Stride
+    const int64_t aux_batch_stride = m * n;
+    CHECK_HIPBLASLT_ERROR(
+        hipblasLtMatmulDescSetAttribute(matmul,
+                                        HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_BATCH_STRIDE,
+                                        &aux_batch_stride,
+                                        sizeof(aux_batch_stride)));
+
+    // Set Desc Bias Data Type
+    int32_t bias_data_type = HIP_R_16F;
+    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
 
     // Allocate and set the bias tensor
-    std::vector<hipblasLtHalf> h_bias(m, 1.0f); // Example bias values, adjust as needed
+    std::vector<hipblasLtHalf> h_bias(
+        m, static_cast<hipblasLtHalf>(1.0)); // Example bias values, adjust as needed
     void* d_bias;
-    CHECK_HIP_ERROR(hipMalloc(&d_bias, m * sizeof(hipblasLtHalf))); // Allocate memory for bias
-    CHECK_HIP_ERROR(hipMemcpy(d_bias, h_bias.data(), m * sizeof(hipblasLtHalf), hipMemcpyHostToDevice)); // Copy bias to device
-
+    CHECK_HIP_ERROR(hipMalloc(&d_bias, m * sizeof(hipblasLtHalf)));
+    CHECK_HIP_ERROR(
+        hipMemcpy(d_bias, h_bias.data(), m * sizeof(hipblasLtHalf), hipMemcpyHostToDevice));
     CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescSetAttribute(
         matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &d_bias, sizeof(void*)));
 
@@ -158,6 +200,7 @@ void simpleGemmBias(hipblasLtHandle_t  handle,
     // In this sample, the workspace is already allocated with max_workspace_size
     // If not, allocate d_workspace here
     // CHECK_HIP_ERRORhipMalloc(&d_workspace, workspace_size));
+
     CHECK_HIPBLASLT_ERROR(hipblasLtMatmul(handle,
                                           matmul,
                                           &alpha,
@@ -174,11 +217,13 @@ void simpleGemmBias(hipblasLtHandle_t  handle,
                                           d_workspace,
                                           workspace_size,
                                           stream));
-    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescDestroy(matmul));
     CHECK_HIPBLASLT_ERROR(hipblasLtMatrixLayoutDestroy(matA));
     CHECK_HIPBLASLT_ERROR(hipblasLtMatrixLayoutDestroy(matB));
     CHECK_HIPBLASLT_ERROR(hipblasLtMatrixLayoutDestroy(matC));
     CHECK_HIPBLASLT_ERROR(hipblasLtMatrixLayoutDestroy(matD));
-    //CHECK_HIP_ERROR(hipFree(d_bias));
+    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulDescDestroy(matmul));
+    CHECK_HIPBLASLT_ERROR(hipblasLtMatmulPreferenceDestroy(pref));
+    CHECK_HIP_ERROR(hipFree(d_aux_buffer));
+    CHECK_HIP_ERROR(hipFree(d_bias));
     return;
 }
